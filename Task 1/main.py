@@ -1,4 +1,6 @@
 from collections import UserDict
+from datetime import datetime, timedelta
+import pickle
 
 
 class Field:
@@ -24,10 +26,22 @@ class Phone(Field):
         return phone.isdigit() and len(phone) == 10
 
 
+class Birthday(Field):
+    def __init__(self, value):
+        try:
+            self.value = datetime.strptime(value, "%d.%m.%Y").date()
+        except ValueError:
+            raise ValueError("Invalid date format. Use DD.MM.YYYY")
+
+    def __str__(self):
+        return self.value.strftime("%d.%m.%Y")
+
+
 class Record:
     def __init__(self, name):
         self.name = Name(name)
         self.phones = []
+        self.birthday = None
 
     def add_phone(self, phone):
         phone_obj = Phone(phone)
@@ -39,6 +53,10 @@ class Record:
             self.phones.remove(phone_obj)
 
     def edit_phone(self, old_phone, new_phone):
+        # Validate old phone format first
+        if not (old_phone.isdigit() and len(old_phone) == 10):
+            raise ValueError("Old phone number must be 10 digits")
+
         phone_obj = self.find_phone(old_phone)
         if phone_obj:
             try:
@@ -56,8 +74,12 @@ class Record:
                 return phone_obj
         return None
 
+    def add_birthday(self, birthday):
+        self.birthday = Birthday(birthday)
+
     def __str__(self):
-        return f"Contact name: {self.name.value}, phones: {'; '.join(p.value for p in self.phones)}"
+        birthday_str = f", birthday: {self.birthday}" if self.birthday else ""
+        return f"Contact name: {self.name.value}, phones: {'; '.join(p.value for p in self.phones)}{birthday_str}"
 
 
 class AddressBook(UserDict):
@@ -71,6 +93,47 @@ class AddressBook(UserDict):
         if name in self.data:
             del self.data[name]
 
+    def get_upcoming_birthdays(self):
+        today = datetime.today().date()
+        upcoming_birthdays = []
+
+        for record in self.data.values():
+            if record.birthday:
+                birthday_this_year = record.birthday.value.replace(year=today.year)
+
+                if birthday_this_year < today:
+                    birthday_this_year = birthday_this_year.replace(year=today.year + 1)
+
+                days_to_birthday = (birthday_this_year - today).days
+
+                if 0 <= days_to_birthday <= 7:
+                    congratulation_date = birthday_this_year
+
+                    if congratulation_date.weekday() == 5:
+                        congratulation_date += timedelta(days=2)
+                    elif congratulation_date.weekday() == 6:
+                        congratulation_date += timedelta(days=1)
+
+                    upcoming_birthdays.append({
+                        "name": record.name.value,
+                        "congratulation_date": congratulation_date.strftime("%d.%m.%Y")
+                    })
+
+        return upcoming_birthdays
+
+
+def save_data(book, filename="addressbook.pkl"):
+    with open(filename, "wb") as f:
+        pickle.dump(book, f)
+
+
+def load_data(filename="addressbook.pkl"):
+    try:
+        with open(filename, "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        return AddressBook()
+
 
 def parse_input(user_input):
     cmd, *args = user_input.split()
@@ -82,52 +145,121 @@ def input_error(func):
     def inner(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except ValueError:
-            return "Where is the name and phone, bro?"
+        except ValueError as e:
+            return f"Input error: {e}"
         except KeyError:
-            return "I`m blind or i can`t find it"
+            return "Contact was not found."
         except IndexError:
-            return "Enter the argument for the command"
+            return "Insufficient arguments for the team."
 
     return inner
 
 
 @input_error
-def add_contact(args, contacts):
-    name, phone = args
-    name = name.lower()
-    contacts[name] = phone
-    return "Contact added."
+def add_contact(args, book):
+    if len(args) < 2:
+        raise IndexError("Name and phone must be provided.")
+
+    name = args[0]
+    phone = args[1]
+
+    record = book.find(name)
+    message = "Contact has been updated."
+    if record is None:
+        record = Record(name)
+        book.add_record(record)
+        message = "The contact has been added."
+
+    record.add_phone(phone)
+    return message
 
 
 @input_error
-def change_contact(args, contacts):
-    name, phone = args
-    name = name.lower()
-    if name in contacts:
-        contacts[name] = phone
-        return "Contact updated, bro!"
+def change_contact(args, book):
+    if len(args) < 3:
+        raise IndexError("You need to specify the name, old phone and new phone.")
+
+    name = args[0]
+    old_phone = args[1]
+    new_phone = args[2]
+
+    record = book.find(name)
+    if record:
+        record.edit_phone(old_phone, new_phone)
+        return "Contact has been updated."
     else:
         raise KeyError()
 
 
 @input_error
-def show_all(contacts):
-    if not contacts:
+def show_phone(args, book):
+    if len(args) < 1:
+        raise IndexError("Name must be specified.")
+
+    name = args[0]
+    record = book.find(name)
+    if record:
+        if record.phones:
+            phones = '; '.join(p.value for p in record.phones)
+            return f"{name}: {phones}"
+        else:
+            return f"{name}: No phones"
+    else:
+        raise KeyError()
+
+
+@input_error
+def show_all(book):
+    if not book.data:
         return "There are no contacts yet."
     result = ""
-    for name, phone in contacts.items():
-        result += f"{name.title()}: {phone}\n"
+    for record in book.data.values():
+        result += f"{record}\n"
     return result.strip()
 
 
 @input_error
-def show_phone(args, contacts):
-    name = args[0].lower()
-    if name in contacts:
-        return f"{name.title()}: {contacts[name]}"
+def add_birthday(args, book):
+    if len(args) < 2:
+        raise IndexError("You must specify the name and date of birth.")
+
+    name = args[0]
+    birthday = args[1]
+
+    record = book.find(name)
+    if record:
+        record.add_birthday(birthday)
+        return "Birthday has been added."
     else:
         raise KeyError()
+
+
+@input_error
+def show_birthday(args, book):
+    if len(args) < 1:
+        raise IndexError("Name must be specified.")
+
+    name = args[0]
+    record = book.find(name)
+    if record:
+        if record.birthday:
+            return f"Birthday {name}: {record.birthday}"
+        else:
+            return f"У {name} no birthday is set"
+    else:
+        raise KeyError()
+
+
+@input_error
+def birthdays(args, book):
+    upcoming = book.get_upcoming_birthdays()
+    if not upcoming:
+        return "There are no birthdays in the next week."
+
+    result = "The coming birthday:\n"
+    for person in upcoming:
+        result += f"{person['name']}: {person['congratulation_date']}\n"
+    return result.strip()
 
 
 def show_help():
@@ -135,89 +267,61 @@ def show_help():
         "Available commands:\n"
         "  hello                   - Greet the bot\n"
         "  add <name> <phone>      - Add a new contact\n"
-        "  change <name> <phone>   - Change the phone number for an existing contact\n"
+        "  change <name> <old_phone> <new_phone> - Change the phone number for an existing contact\n"
         "  phone <name>            - Show the phone number of a contact\n"
-        "  show all                - Show all contacts\n"
+        "  all                     - Show all contacts\n"
+        "  add-birthday <name> <birthday> - Add birthday to contact\n"
+        "  show-birthday <name>    - Show birthday of a contact\n"
+        "  birthdays               - Show upcoming birthdays\n"
         "  help                    - Show this help message\n"
         "  close / exit            - Exit the assistant"
     )
 
 
 def main():
+    book = load_data()
     print("Welcome to the super duper terminal bot")
-    contacts = {}
 
     while True:
         user_input = input("Enter command: ")
         command, args = parse_input(user_input)
 
         if command in ["close", "exit"]:
-            print("See you later!!!")
+            print("See you later, bro!")
             break
 
         elif command == "hello":
-            print("What can I do for you, bro?")
+            print("How can I help you?")
 
         elif command == "add":
-            print(add_contact(args, contacts))
+            print(add_contact(args, book))
 
         elif command == "change":
-            print(change_contact(args, contacts))
+            print(change_contact(args, book))
 
         elif command == "phone":
-            print(show_phone(args, contacts))
+            print(show_phone(args, book))
 
-        elif command == "show":
-            if args and args[0].lower() == "all":
-                print(show_all(contacts))
-            else:
-                print("To see all contacts, type: show all")
+        elif command == "all":
+            print(show_all(book))
+
+        elif command == "add-birthday":
+            print(add_birthday(args, book))
+
+        elif command == "show-birthday":
+            print(show_birthday(args, book))
+
+        elif command == "birthdays":
+            print(birthdays(args, book))
 
         elif command == "help":
             print(show_help())
+
         else:
             print("something wrong.")
+
+    save_data(book)
 
 
 if __name__ == "__main__":
     main()
-
-
-# # Testing classes
-# if __name__ == "__main__":
-#     # Create a new address book
-#     book = AddressBook()
-#
-#     # Create a record for John
-#     john_record = Record("John")
-#     john_record.add_phone("1234567890")
-#     john_record.add_phone("5555555555")
-#
-#     # Add John record to an address book
-#     book.add_record(john_record)
-#
-#     # Create and add a new record for Jane
-#     jane_record = Record("Jane")
-#     jane_record.add_phone("9876543210")
-#     book.add_record(jane_record)
-#
-#     # Display all records in the book
-#     print("All contacts:")
-#     for name, record in book.data.items():
-#         print(f"{name}: {[phone.value for phone in record.phones]}")
-#
-#     # Find a specific record
-#     john = book.find("John")
-#     print(f"\nJohn's phones: {[phone.value for phone in john.phones]}")
-#
-#     # Edit phone number
-#     john.edit_phone("1234567890", "1112223333")
-#     print(f"John's phones after editing: {[phone.value for phone in john.phones]}")
-#
-#     # Remove phone number
-#     john.remove_phone("5555555555")
-#     print(f"John's phones after removal: {[phone.value for phone in john.phones]}")
-#
-#     # Delete record
-#     book.delete("Jane")
-#     print(f"\nContacts after deleting Jane: {list(book.data.keys())}")
